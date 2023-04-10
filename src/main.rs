@@ -1,156 +1,67 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    time::Duration, error::Error, convert::Infallible,
-};
+use eyre::{Context, Result};
+use fantoccini::{elements::Element, ClientBuilder, Locator, Client};
+use futures_util::{StreamExt, TryStreamExt};
+use std::collections::HashMap;
+use tracing::info;
 
-use anyhow::bail;
-use headless_chrome::{
-    browser::tab::element::ElementQuad,
-    protocol::cdp::DOM::{self, BoxModel, Node},
-    types::CurrentBounds,
-    Browser, Element, Tab,
-};
-use indexmap::IndexSet;
-use tracing::{debug, info, field::Visit};
-use url::Url;
+#[derive(Clone, Default)]
+struct ElementProcessor {
+    freq: HashMap<String, usize>,
+    window_width: u64,
+    window_height: u64,
+}
+impl ElementProcessor {
+    async fn new(c: &Client) -> Result<Self> {
+        let (window_width, window_height) = c.get_window_size().await?;
+        Ok(Self {
+            freq: Default::default(),
+            window_height,
+            window_width,
+        })
+    }
+    async fn process_node(mut self, v: Element) -> Result<Self> {
+        let name = v.tag_name().await?;
 
-fn main() -> anyhow::Result<()> {
+        match name.as_str() {
+            "div" => {
+                let (x, y, w, h) = v.rectangle().await?;
+                let w = w / self.window_width as f64;
+                let h = h / self.window_height as f64;
+                
+                info!("({x}, {y}) {w} x {h}");
+            }
+            _ => {}
+        }
+
+        *self.freq.entry(name).or_default() += 1;
+        Ok(self)
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let browser = Browser::default()?;
-    let tab = browser.new_tab()?;
+    let c = ClientBuilder::native()
+        .connect("http://localhost:4444")
+        .await
+        .wrap_err("failed to connect to WebDriver!")?;
 
-    let mut visitor = CountVisitor::new(&tab)?;
+    c.set_ua("Quotelementa-Crawler").await?;
 
-    let mut crawler = Crawler::new(&tab)?;
-    crawler.sites.insert(Url::parse("https://en.wikipedia.org")?);
-    crawler.crawl_one(&mut visitor)?;
+    c.goto("https://pluie.me").await?;
 
-    let sites = crawler
-        .sites
-        .into_iter()
-        .map(|u| u.as_str().to_owned())
-        .collect::<Vec<_>>();
-    let visited = crawler
-        .visited
-        .into_iter()
-        .map(|u| u.as_str().to_owned())
-        .collect::<Vec<_>>();
-    info!(?visitor.map, ?sites, ?visited);
-    
+    let element = c.find(Locator::Css("body")).await?;
+    let elements = element.find_all(Locator::Css("*")).await?;
+
+    let processor = ElementProcessor::new(&c).await?;
+    let processor = futures_util::stream::iter(elements)
+        .map(Ok::<_, eyre::Report>)
+        .try_fold(processor, ElementProcessor::process_node)
+        .await?;
+
+    info!(?processor.freq);
+
+    c.close().await?;
     Ok(())
-}
-
-pub fn get_attribute_value<'a, S: AsRef<str> + 'a>(attrs: &'a [S], key: &'a str) -> Option<&'a str> {
-    attrs.iter().position(|s| s.as_ref() == key).and_then(|p| attrs.get(p + 1).map(AsRef::as_ref))
-}
-
-pub trait Visitor {
-    type Err;
-
-    fn visit(&mut self, node: &Node) -> Result<(), Self::Err>;
-}
-
-
-pub struct Crawler<'a> {
-    tab: &'a Tab,
-    sites: IndexSet<Url>,
-    visited: IndexSet<Url>,
-}
-impl<'a> Crawler<'a> {
-    fn new(tab: &'a Tab) -> anyhow::Result<Self> {
-        Ok(Self {
-            tab,
-            sites: Default::default(),
-            visited: Default::default(),
-        })
-    }
-    fn crawl_one<V: Visitor>(&mut self, visitor: &mut V) -> anyhow::Result<()>
-    where
-        V::Err: Error + Sync + Send + 'static
-    {
-        let Some(site) = self.sites.pop() else { return Ok(()); };
-
-        if self.visited.contains(&site) {
-            debug!(?site, "Site already visited!");
-            return Ok(()); // already visited!
-        }
-
-        self.tab.navigate_to(site.as_str())?;
-
-        info!("Start sleeping for 5 seconds");
-        std::thread::sleep(Duration::from_secs(5));
-        info!("Damn, felt like an eternity");
-
-        let body = self.tab.find_element("body")?;
-        let body = self.tab.describe_node(body.node_id)?;
-
-        self.accept(&body, visitor)?;
-        self.visited.insert(site);
-
-        Ok(())
-    }
-    fn accept<V: Visitor>(&mut self, node: &Node, visitor: &mut V) -> Result<(), V::Err> {
-        if let Some(children) = &node.children {
-            for child in children {
-                self.accept(child, visitor)?;
-            }
-        }
-
-        visitor.visit(node)
-    }
-}
-
-pub struct CountVisitor<'a> {
-    tab: &'a Tab,
-    dims: CurrentBounds,
-
-    map: HashMap<String, u32>,
-}
-impl<'a> CountVisitor<'a> {
-    fn new(tab: &'a Tab) -> anyhow::Result<Self> {
-        let dims = tab.get_bounds()?;
-        info!("dims: {} x {}", dims.width, dims.height);
-
-        Ok(Self {
-            tab,
-            dims,
-            map: Default::default(),
-        })
-    }
-    fn visit_div(&mut self, node: &Node) {
-        if let Ok(bbox) = self.tab.call_method(DOM::GetBoxModel {
-            backend_node_id: Some(node.backend_node_id),
-            node_id: None,
-            object_id: None,
-        }) {
-            let margin = ElementQuad::from_raw_points(&bbox.model.margin);
-            let BoxModel { width, height, .. } = bbox.model;
-            info!(
-                "dim: {} x {} | pos: ({}, {})",
-                width as f32 / self.dims.width as f32,
-                height as f32 / self.dims.height as f32,
-                margin.top_left.x,
-                margin.top_left.y,
-            );
-        }
-    }
-}
-impl Visitor for CountVisitor<'_> {
-    type Err = Infallible;
-    
-    fn visit(&mut self, node: &Node) -> Result<(), Self::Err> {
-        // we only consider elements.
-        if node.node_type == 1 {
-            let name = node.node_name.to_ascii_lowercase();
-
-            match name.as_str() {
-                "div" => self.visit_div(&node),
-                _ => {},
-            }
-
-            *self.map.entry(name).or_default() += 1;
-        }
-        Ok(())
-    }
 }
