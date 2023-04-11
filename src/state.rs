@@ -52,7 +52,7 @@ impl State {
         })
     }
 
-    pub async fn accept_node(mut self, v: Element) -> Result<Self> {
+    pub async fn accept_node(self, v: Element) -> Result<Self> {
         let Ok(tag) = v.tag_name().await else {
             warn!(v = ?v.element_id(), "Unable to get name for element - perhaps it has already been removed from the DOM?");
             return Ok(self);
