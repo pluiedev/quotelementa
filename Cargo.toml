@@ -6,11 +6,19 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+ctrlc = "3.2"
+deadqueue = "0.2"
 eyre = "0.6"
 fantoccini = "0.20.0-rc.4"
-futures-util = "0.3.28"
+futures-util = "0.3"
 indexmap = "1.9"
-tokio = { version = "1.27", features = ["rt-multi-thread", "macros"] }
-tracing = "0.1.37"
-tracing-subscriber = "0.3.16"
-url = "2.3.1"
+tokio = { version = "1.27", features = [
+	"rt-multi-thread",
+	"macros",
+	"io-util",
+	"fs",
+	"process",
+] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+url = "2.3"
