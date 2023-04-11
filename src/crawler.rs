@@ -10,7 +10,7 @@ use fantoccini::{wd::Capabilities, Client, ClientBuilder, Locator};
 use futures_util::{StreamExt, TryStreamExt};
 use tracing::*;
 
-use crate::{state::State, ShutdownRx};
+use crate::{state::{State, Output}, ShutdownRx};
 
 pub struct Crawler {
     port: u16,
@@ -24,6 +24,7 @@ impl Crawler {
     pub async fn new(
         driver: &Path,
         port: u16,
+        output: Output,
         queue: Arc<Queue<String>>,
         capabilities: Capabilities,
     ) -> Result<Self> {
@@ -51,7 +52,7 @@ impl Crawler {
 
         client.set_ua("Quotelementa-Crawler").await?;
 
-        let state = State::new(&client).await?;
+        let state = State::new(output, &client).await?;
 
         Ok(Self {
             port,

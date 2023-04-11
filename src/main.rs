@@ -13,8 +13,6 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::{sync::watch, task::JoinSet};
 use tracing::*;
 
-use crate::state::State;
-
 type ShutdownRx = watch::Receiver<()>;
 
 /// Crawls the interwebs and analyzes the utilization of elemental constituents
@@ -62,15 +60,17 @@ async fn main() -> Result<()> {
 
     let queue = Arc::new(Queue::<String>::new(10));
     let mut set = JoinSet::new();
+    let output = Output::default();
 
     for port in 0..opts.workers {
         let driver = opts.driver.clone();
         let queue = Arc::clone(&queue);
         let rx = rx.clone();
         let caps = caps.clone();
+        let output = output.clone();
 
         set.spawn(async move {
-            let crawler = Crawler::new(&driver, opts.base_port + port, queue, caps)
+            let crawler = Crawler::new(&driver, opts.base_port + port, output, queue, caps)
                 .await
                 .unwrap();
             crawler.run(rx).await
@@ -80,14 +80,10 @@ async fn main() -> Result<()> {
     let assigner = Assigner::new(&opts.sites, queue.clone()).await?;
     tokio::spawn(assigner.run(rx));
 
-    let mut output = Output::default();
 
     loop {
         tokio::select! {
-            Some(res) = set.join_next() => {
-                let res: State = res??;
-                output.merge(res.output);
-            }
+            Some(_) = set.join_next() => {}
             else => {
                 info!("Everything done! Exiting...");
                 break;
