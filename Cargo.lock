@@ -137,9 +137,9 @@ dependencies = [
 
 [[package]]
 name = "fantoccini"
-version = "0.20.0-rc.4"
+version = "0.19.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5eb32b0001134a1d3b9e16010eb4b119451edf68446963a30a8130a0d056e98"
+checksum = "65f0fbe245d714b596ba5802b46f937f5ce68dcae0f32f9a70b5c3b04d3c6f64"
 dependencies = [
  "base64",
  "cookie",
@@ -588,6 +588,7 @@ dependencies = [
  "fantoccini",
  "futures-util",
  "indexmap",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
