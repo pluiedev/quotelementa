@@ -36,6 +36,7 @@ pub struct BarChart<'a, I, S> {
     _phan: PhantomData<S>,
 }
 
+#[allow(dead_code)]
 impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> BarChart<'a, I, S> {
     pub fn new(data: I) -> Self {
         Self {
@@ -44,9 +45,9 @@ impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> BarChart<'a, I, S> {
             bar_gap: 1,
             bar_set: symbols::bar::NINE_LEVELS,
             bar_style: Style::default(),
-            value_style: Default::default(),
-            label_style: Default::default(),
-            style: Default::default(),
+            value_style: Style::default(),
+            label_style: Style::default(),
+            style: Style::default(),
             data,
             max: None,
             _phan: PhantomData,
@@ -104,6 +105,7 @@ impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> BarChart<'a, I, S> {
 }
 
 impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> Widget for BarChart<'a, I, S> {
+    #[allow(clippy::cast_possible_truncation)]
     fn render(mut self, area: Rect, buf: &mut Buffer) {
         buf.set_style(area, self.style);
 

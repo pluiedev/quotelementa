@@ -74,13 +74,13 @@ impl Tui {
         self.end()
     }
 
-    fn ui(&mut self) -> impl FnOnce(&mut Frame<Backend>) {
+    fn ui(&mut self) -> impl FnOnce(&mut Frame<'_, Backend>) {
         // this is SUCH a bad API...
         let mut freq: Vec<_> = self
             .output
             .freq
             .iter()
-            .map(|v| (v.key().to_owned(), *v.value() as u64))
+            .map(|v| (v.key().clone(), *v.value() as u64))
             .collect();
         freq.sort_by(|a, b| b.1.cmp(&a.1));
 

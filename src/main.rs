@@ -1,3 +1,12 @@
+#![deny(rust_2018_idioms)]
+#![warn(clippy::pedantic)]
+#![allow(
+    missing_docs,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::wildcard_imports
+)]
+
 pub mod assigner;
 pub mod crawler;
 pub mod state;
@@ -14,7 +23,7 @@ use tokio::{
     sync::{oneshot, watch},
     task::JoinSet,
 };
-use tracing::*;
+use tracing::{info, warn};
 
 use crate::{assigner::Assigner, crawler::Crawler, state::Output, tui::Tui};
 
@@ -75,7 +84,7 @@ async fn main() -> Result<()> {
     let assigner = Assigner::new(&opts.sites, job_queue.clone()).await?;
     tokio::spawn(assigner.run(shutdown_rx));
 
-    while let Some(_) = workers.join_next().await {}
+    while workers.join_next().await.is_some() {}
 
     info!("Everything done! Exiting...");
     close_tx.send(()).unwrap();

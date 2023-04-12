@@ -21,14 +21,15 @@ impl State {
         let (window_width, window_height) = c.get_window_size().await?;
         Ok(Self {
             output,
-            window_height,
             window_width,
+            window_height,
         })
     }
 
-    pub async fn accept_node(self, v: Element) -> Result<Self> {
-        let Ok(tag) = v.tag_name().await else {
-            warn!(v = ?v.element_id(), "Unable to get name for element - perhaps it has already been removed from the DOM?");
+    #[allow(clippy::cast_precision_loss)]
+    pub async fn accept_node(self, elem: Element) -> Result<Self> {
+        let Ok(tag) = elem.tag_name().await else {
+            warn!(v = ?elem.element_id(), "Unable to get name for element - perhaps it has already been removed from the DOM?");
             return Ok(self);
         };
 
@@ -42,7 +43,7 @@ impl State {
 
         match tag.as_str() {
             "div" => {
-                let (x, y, w, h) = v.rectangle().await?;
+                let (x, y, w, h) = elem.rectangle().await?;
                 let w = w / self.window_width as f64;
                 let h = h / self.window_height as f64;
 
