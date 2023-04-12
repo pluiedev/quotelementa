@@ -1,4 +1,4 @@
-use std::{path::Path};
+use std::path::Path;
 
 use eyre::Result;
 use tokio::{
@@ -6,7 +6,7 @@ use tokio::{
     io::{AsyncBufReadExt, BufReader, Lines},
 };
 
-use crate::{ShutdownRx, JobQueue};
+use crate::{JobQueue, ShutdownRx};
 
 pub struct Assigner {
     source: Lines<BufReader<File>>,

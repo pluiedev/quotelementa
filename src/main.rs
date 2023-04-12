@@ -6,7 +6,6 @@ pub mod tui;
 use argh::FromArgs;
 use deadqueue::limited::Queue;
 use eyre::Result;
-use state::State;
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use tui_logger::TuiTracingSubscriberLayer;
 
@@ -46,12 +45,18 @@ struct Opts {
     sites: PathBuf,
 }
 
-type Workers = JoinSet<Result<State>>;
+type Workers = JoinSet<Result<()>>;
 type JobQueue = Arc<Queue<String>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::registry()
+    let appender = tracing_appender::rolling::daily(".", "quotelementa.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(appender);
+
+    tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(non_blocking)
+        .finish()
         .with(TuiTracingSubscriberLayer)
         .init();
 
@@ -60,10 +65,12 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let (close_tx, close_rx) = oneshot::channel();
 
-    let tui = Tui::new()?;
+    let output = Output::default();
+
+    let tui = Tui::new(output.clone())?;
     tokio::spawn(tui.run(shutdown_tx, close_rx));
 
-    let (mut workers, job_queue, output) = spawn_workers(&opts, &shutdown_rx);
+    let (mut workers, job_queue) = spawn_workers(&opts, &shutdown_rx, &output);
 
     let assigner = Assigner::new(&opts.sites, job_queue.clone()).await?;
     tokio::spawn(assigner.run(shutdown_rx));
@@ -77,7 +84,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn spawn_workers(opts: &Opts, rx: &ShutdownRx) -> (Workers, JobQueue, Output) {
+fn spawn_workers(opts: &Opts, rx: &ShutdownRx, output: &Output) -> (Workers, JobQueue) {
     let mut caps = serde_json::map::Map::new();
     if !opts.no_headless {
         let args = serde_json::json!({
@@ -89,7 +96,6 @@ fn spawn_workers(opts: &Opts, rx: &ShutdownRx) -> (Workers, JobQueue, Output) {
 
     let job_queue = Arc::new(Queue::<String>::new(10));
     let mut workers = JoinSet::new();
-    let output = Output::default();
 
     for port in 0..opts.workers {
         let driver = opts.driver.clone();
@@ -107,5 +113,5 @@ fn spawn_workers(opts: &Opts, rx: &ShutdownRx) -> (Workers, JobQueue, Output) {
         });
     }
 
-    (workers, job_queue, output)
+    (workers, job_queue)
 }

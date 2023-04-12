@@ -64,7 +64,7 @@ impl Crawler {
     }
 
     #[tracing::instrument(skip_all, fields(port = self.port))]
-    pub async fn run(mut self, mut shutdown_rx: ShutdownRx) -> Result<State> {
+    pub async fn run(mut self, mut shutdown_rx: ShutdownRx) -> Result<()> {
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
@@ -79,7 +79,7 @@ impl Crawler {
         }
         self.client.close().await?;
 
-        Ok(self.state)
+        Ok(())
     }
 
     #[tracing::instrument(skip(self))]
