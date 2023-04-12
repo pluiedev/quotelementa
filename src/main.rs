@@ -14,32 +14,40 @@ pub mod tui;
 mod util;
 
 use argh::FromArgs;
+use crawler::CrawlerReport;
 use deadqueue::limited::Queue;
 use eyre::Result;
 use futures_util::TryFutureExt;
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use tui_logger::TuiTracingSubscriberLayer;
 use url::Url;
+use util::Port;
 
 use std::{path::PathBuf, sync::Arc};
 use tokio::{
-    sync::{oneshot, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinSet,
 };
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use crate::{assigner::Assigner, crawler::Crawler, state::Output, tui::Tui, util::ShutdownRx};
+use crate::{
+    assigner::Assigner,
+    crawler::Crawler,
+    state::Output,
+    tui::{App, Tui},
+    util::ShutdownRx,
+};
 
 /// Crawls the interwebs and analyzes the utilization of elemental constituents
 #[derive(FromArgs)]
 struct Opts {
     /// the number of workers running concurrently
     #[argh(option, short = 'n', default = "3")]
-    workers: u16,
+    workers: Port,
 
     /// the base port
     #[argh(option, short = 'p', default = "4444")]
-    base_port: u16,
+    base_port: Port,
 
     /// do not run the WebDriver in headless mode
     /// (GeckoDriver and ChromeDriver only)
@@ -75,17 +83,15 @@ async fn main() -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(());
     let (close_tx, close_rx) = oneshot::channel();
 
-    let output = Output::default();
+    let (mut crawlers, job_queue, output, report_rx) = spawn_crawlers(&opts, &shutdown_rx);
 
-    let tui = Tui::new(output.clone())?;
-    tokio::spawn(tui.run(shutdown_tx, close_rx));
-
-    let (mut workers, job_queue) = spawn_workers(&opts, &shutdown_rx, &output);
+    let tui = Tui::new(App::new(output.clone(), report_rx, shutdown_tx))?;
+    tokio::spawn(tui.run(close_rx));
 
     let assigner = Assigner::new(&opts.sites, job_queue.clone()).await?;
     tokio::spawn(assigner.run(shutdown_rx));
 
-    while let Some(res) = workers.join_next().await {
+    while let Some(res) = crawlers.join_next().await {
         if let Err(e) = res? {
             error!(?e, "Encountered error while crawling")
         }
@@ -98,7 +104,10 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn spawn_workers(opts: &Opts, rx: &ShutdownRx, output: &Output) -> (Workers, JobQueue) {
+fn spawn_crawlers(
+    opts: &Opts,
+    rx: &ShutdownRx,
+) -> (Workers, JobQueue, Output, mpsc::Receiver<CrawlerReport>) {
     let mut caps = serde_json::map::Map::new();
     if !opts.no_headless {
         let args = serde_json::json!({
@@ -108,8 +117,12 @@ fn spawn_workers(opts: &Opts, rx: &ShutdownRx, output: &Output) -> (Workers, Job
         caps.insert("goog:chromeOptions".to_owned(), args);
     }
 
-    let job_queue = Arc::new(Queue::new(10));
+    let double_workers = usize::from(opts.workers * 2);
+    let (report_tx, report_rx) = mpsc::channel(double_workers);
+
+    let job_queue = Arc::new(Queue::new(double_workers));
     let mut workers = JoinSet::new();
+    let output = Output::default();
 
     for port in 0..opts.workers {
         let rx = rx.clone();
@@ -121,10 +134,11 @@ fn spawn_workers(opts: &Opts, rx: &ShutdownRx, output: &Output) -> (Workers, Job
                 output.clone(),
                 job_queue.clone(),
                 caps.clone(),
+                report_tx.clone(),
             )
             .and_then(|c| c.run(rx)),
         );
     }
 
-    (workers, job_queue)
+    (workers, job_queue, output, report_rx)
 }

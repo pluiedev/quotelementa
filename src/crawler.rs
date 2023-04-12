@@ -1,4 +1,5 @@
 use std::{
+    fmt::Display,
     path::PathBuf,
     process::{Command, Stdio},
 };
@@ -6,31 +7,67 @@ use std::{
 use eyre::{Context, Result};
 use fantoccini::{wd::Capabilities, Client, ClientBuilder, Locator};
 use futures_util::{StreamExt, TryStreamExt};
+use tokio::sync::mpsc;
 use tracing::*;
 use url::Url;
 
 use crate::{
     state::{Output, State},
+    util::Port,
     JobQueue, ShutdownRx,
 };
 
+#[derive(Clone, Debug)]
+pub struct CrawlerReport {
+    pub port: Port,
+    pub state: CrawlerState,
+}
+#[derive(Clone, Debug)]
+pub enum CrawlerState {
+    Initializing,
+    InProgress(String),
+    Idle,
+    RanOutOfTasks,
+    ShuttingDown,
+}
+impl Display for CrawlerState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Initializing => write!(f, "Initializing..."),
+            Self::InProgress(url) => write!(f, "{url}"),
+            Self::Idle => write!(f, "Idle"),
+            Self::RanOutOfTasks => write!(f, "Ran out of tasks"),
+            Self::ShuttingDown => write!(f, "Shutting down..."),
+        }
+    }
+}
+
 pub struct Crawler {
-    port: u16,
+    port: Port,
     client: Client,
     pub state: State,
 
     job_queue: JobQueue,
+    report_tx: mpsc::Sender<CrawlerReport>,
 }
 impl Crawler {
     #[tracing::instrument(skip_all, fields(port = port))]
     pub async fn new(
         driver: PathBuf,
-        port: u16,
+        port: Port,
         output: Output,
         job_queue: JobQueue,
         capabilities: Capabilities,
+        report_tx: mpsc::Sender<CrawlerReport>,
     ) -> Result<Self> {
         info!("Initializing crawler instance");
+        report_tx
+            .send(CrawlerReport {
+                port,
+                state: CrawlerState::Initializing,
+            })
+            .await
+            .expect("UI should still be alive");
 
         let log_path = format!("webdriver-{port}.log");
         let log_file = std::fs::File::create(&log_path)?;
@@ -61,7 +98,18 @@ impl Crawler {
             client,
             state,
             job_queue,
+            report_tx,
         })
+    }
+
+    async fn report(&self, kind: CrawlerState) {
+        self.report_tx
+            .send(CrawlerReport {
+                port: self.port,
+                state: kind,
+            })
+            .await
+            .expect("Expected UI to be still alive")
     }
 
     #[tracing::instrument(skip_all, fields(port = self.port))]
@@ -70,6 +118,7 @@ impl Crawler {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
                     info!("Shutdown received - exiting");
+                    self.report(CrawlerState::ShuttingDown).await;
                     break;
                 }
                 res = self.crawl_loop() => match res {
@@ -92,19 +141,25 @@ impl Crawler {
     #[tracing::instrument(skip(self))]
     async fn crawl_loop(&mut self) -> Result<()> {
         while self.job_queue.available() > 0 {
-            info!("Crawler {}: Waiting for work", self.port);
+            info!(?self.port, "Waiting for work");
+            self.report(CrawlerState::Idle).await;
 
             let site = self.job_queue.pop().await;
             self.crawl(site).await?;
         }
 
         info!("No work remains! Exiting");
+        self.report(CrawlerState::RanOutOfTasks).await;
         Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(url = url.as_str()))]
     async fn crawl(&mut self, url: Url) -> Result<()> {
-        info!("Crawler {}: Crawling {}", self.port, url);
+        info!(?url, ?self.port, "Start crawling");
+        self.report(CrawlerState::InProgress(
+            url.as_str().trim_start_matches("https://").to_owned(),
+        ))
+        .await;
 
         self.client
             .goto(url.as_str())

@@ -1,6 +1,7 @@
 use strum::{Display, EnumString, EnumCount, FromRepr};
 use tokio::sync::watch;
 
+pub type Port = u16;
 pub type ShutdownRx = watch::Receiver<()>;
 
 

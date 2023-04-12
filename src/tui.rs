@@ -1,6 +1,6 @@
 mod bar_chart;
 
-use std::{io::Stdout, time::Duration, vec};
+use std::{collections::HashMap, io::Stdout, time::Duration, vec};
 
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
@@ -10,16 +10,19 @@ use eyre::Result;
 use futures_util::StreamExt;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Span, Spans},
     widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
-use tokio::sync::{oneshot, watch};
-use tui_logger::TuiLoggerWidget;
+use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::{state::Output, util::Tag};
+use crate::{
+    crawler::{CrawlerReport, CrawlerState},
+    state::Output,
+    util::{Port, Tag},
+};
 
 use self::bar_chart::BarChart;
 
@@ -30,7 +33,7 @@ pub struct Tui {
     app: App,
 }
 impl Tui {
-    pub fn new(output: Output) -> Result<Self> {
+    pub fn new(app: App) -> Result<Self> {
         let backend = {
             terminal::enable_raw_mode()?;
             let mut stdout = std::io::stdout();
@@ -38,11 +41,6 @@ impl Tui {
             CrosstermBackend::new(stdout)
         };
         let terminal = Terminal::new(backend)?;
-
-        let app = App {
-            freq: vec![],
-            output,
-        };
 
         Ok(Self { terminal, app })
     }
@@ -53,23 +51,14 @@ impl Tui {
 
         Ok(())
     }
-    pub async fn run(
-        mut self,
-        shutdown_tx: watch::Sender<()>,
-        mut close_rx: oneshot::Receiver<()>,
-    ) -> Result<()> {
+    pub async fn run(mut self, mut close_rx: oneshot::Receiver<()>) -> Result<()> {
         let mut events = EventStream::new();
         let mut ui_update_ticker = tokio::time::interval(Duration::from_millis(100));
 
         loop {
             tokio::select! {
                 _ = &mut close_rx => break,
-                Some(event) = events.next() => match event? {
-                    Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. }) => {
-                        shutdown_tx.send(()).unwrap();
-                    }
-                    _ => {}
-                },
+                Some(event) = events.next() => self.app.on_event(event?)?,
                 _ = ui_update_ticker.tick() => {
                     self.app.update().await;
                     let ui = self.app.ui();
@@ -82,11 +71,50 @@ impl Tui {
     }
 }
 
-struct App {
+const SPINNER_STATES: [&str; 8] = ["⣼", "⣹", "⢻", "⠿", "⡟", "⣏", "⣧", "⣶"];
+type SpinnerState = u8;
+
+pub struct App {
     freq: Vec<(String, u64)>,
     output: Output,
+
+    is_shutting_down: bool,
+    shutdown_tx: watch::Sender<()>,
+
+    crawlers: HashMap<Port, (SpinnerState, CrawlerState)>,
+    report_rx: mpsc::Receiver<CrawlerReport>,
 }
 impl App {
+    pub fn new(
+        output: Output,
+        report_rx: mpsc::Receiver<CrawlerReport>,
+        shutdown_tx: watch::Sender<()>,
+    ) -> Self {
+        Self {
+            freq: vec![],
+            output,
+            is_shutting_down: false,
+            shutdown_tx,
+            crawlers: HashMap::new(),
+            report_rx,
+        }
+    }
+
+    fn on_event(&mut self, event: Event) -> Result<()> {
+        match event {
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }) => {
+                self.is_shutting_down = true;
+                self.shutdown_tx.send(()).unwrap();
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     async fn update(&mut self) {
         if self.output.freq.is_dirty() {
             // kinda jank but... oh well
@@ -104,46 +132,87 @@ impl App {
                 .collect();
             self.freq.sort_by(|(_, v1), (_, v2)| v2.cmp(&v1));
         }
+        while let Ok(report) = self.report_rx.try_recv() {
+            self.crawlers.insert(report.port, (0, report.state));
+        }
     }
 
     fn ui(&mut self) -> impl FnOnce(&mut Frame<'_, Backend>) + '_ {
+        let crawlers: Vec<_> = self
+            .crawlers
+            .iter_mut()
+            .map(|(k, (spinner, v))| {
+                let spinner = if v.should_spinner_spin() {
+                    *spinner = (*spinner + 1) & 0b111;
+                    SPINNER_STATES[*spinner as usize]
+                } else {
+                    *spinner = 0;
+                    "⣿"
+                };
+                let spinner = Span::styled(spinner, Style::default().fg(v.spinner_color()));
+
+                Spans::from(vec![
+                    Span::from(" "),
+                    Span::from(k.to_string()),
+                    Span::from(" "),
+                    spinner,
+                    Span::from(" "),
+                    Span::from(v.to_string()),
+                ])
+            })
+            .collect();
+
         |f| {
             let layout = Layout::default()
-                .margin(1)
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-                .split(f.size());
-            let bottom = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-                .split(layout[1]);
+                .constraints([Constraint::Max(40), Constraint::Percentage(70)])
+                .split(f.size());
+
+            let info = Paragraph::new(crawlers)
+                .block(Block::default().title("Status").borders(Borders::ALL));
+            f.render_widget(info, layout[0]);
 
             let chart = BarChart::new(&self.freq)
                 .block(Block::default().title("Histogram").borders(Borders::ALL))
                 .bar_width(10)
                 .bar_gap(1);
-            f.render_widget(chart, layout[0]);
+            f.render_widget(chart, layout[1]);
 
-            let info = Paragraph::new(vec![
-                Spans::from(Span::from("4444")),
-                Spans::from(Span::from("4445")),
-                Spans::from(Span::from("4446")),
-            ])
-            .block(Block::default().borders(Borders::ALL))
-            .alignment(Alignment::Center);
-            f.render_widget(info, bottom[0]);
-
-            let widget = TuiLoggerWidget::default()
-                .block(Block::default().title("Log").borders(Borders::ALL))
-                .output_separator(' ')
-                .output_level(None)
-                .output_file(false)
-                .output_line(false)
-                .style_warn(Style::default().fg(Color::Yellow))
-                .style_error(Style::default().fg(Color::Red))
-                .style_trace(Style::default().fg(Color::Magenta))
-                .style_debug(Style::default().fg(Color::Blue));
-            f.render_widget(widget, bottom[1]);
+            if self.is_shutting_down {
+                let status = Paragraph::new(vec![
+                    Spans::from(" Press CTRL+C again to force quit.                           "),
+                    Spans::from(" (You might have to terminate leftover WebDriver processes!) ")
+                ])
+                    .block(Block::default().borders(Borders::ALL))
+                    .style(Style::default().fg(Color::Red).bg(Color::Gray));
+                f.render_widget(
+                    status,
+                    Rect {
+                        x: 0,
+                        y: f.size().bottom() - 4,
+                        width: 63,
+                        height: 4,
+                    },
+                );
+            }
         }
+    }
+}
+
+impl CrawlerState {
+    pub fn spinner_color(&self) -> Color {
+        match self {
+            Self::Initializing => Color::Yellow,
+            Self::InProgress(_) => Color::LightGreen,
+            Self::Idle => Color::White,
+            Self::RanOutOfTasks => Color::DarkGray,
+            Self::ShuttingDown => Color::LightRed,
+        }
+    }
+    pub fn should_spinner_spin(&self) -> bool {
+        matches!(
+            self,
+            Self::Initializing | Self::InProgress(_) | Self::ShuttingDown
+        )
     }
 }
