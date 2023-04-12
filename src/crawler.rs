@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::PathBuf,
     process::{Command, Stdio},
 };
 
@@ -7,6 +7,7 @@ use eyre::{Context, Result};
 use fantoccini::{wd::Capabilities, Client, ClientBuilder, Locator};
 use futures_util::{StreamExt, TryStreamExt};
 use tracing::*;
+use url::Url;
 
 use crate::{
     state::{Output, State},
@@ -23,7 +24,7 @@ pub struct Crawler {
 impl Crawler {
     #[tracing::instrument(skip_all, fields(port = port))]
     pub async fn new(
-        driver: &Path,
+        driver: PathBuf,
         port: u16,
         output: Output,
         job_queue: JobQueue,
@@ -73,11 +74,17 @@ impl Crawler {
                 }
                 res = self.crawl_loop() => match res {
                     Ok(()) => break,
-                    Err(e) => error!("Error while crawling site: {e}")
+                    Err(e) => return Err(e),
                 }
             }
         }
-        self.client.close().await?;
+
+        tokio::select! {
+            _ = shutdown_rx.changed() => {
+                info!("Forcibly shutting down!");
+            }
+            res = self.client.close() => res?,
+        }
 
         Ok(())
     }
@@ -85,7 +92,7 @@ impl Crawler {
     #[tracing::instrument(skip(self))]
     async fn crawl_loop(&mut self) -> Result<()> {
         while self.job_queue.available() > 0 {
-            info!(?self.port, "Crawler waiting for work");
+            info!("Crawler {}: Waiting for work", self.port);
 
             let site = self.job_queue.pop().await;
             self.crawl(site).await?;
@@ -95,14 +102,14 @@ impl Crawler {
         Ok(())
     }
 
-    #[tracing::instrument(skip(self))]
-    async fn crawl(&mut self, site: String) -> Result<()> {
-        info!("Crawling started");
+    #[tracing::instrument(skip_all, fields(url = url.as_str()))]
+    async fn crawl(&mut self, url: Url) -> Result<()> {
+        info!("Crawler {}: Crawling {}", self.port, url);
 
-        if let Err(e) = self.client.goto(&site).await {
-            error!(?site, "Failed to navigate to site: {e}");
-            return Ok(());
-        }
+        self.client
+            .goto(url.as_str())
+            .await
+            .wrap_err("Failed to navigate to site")?;
 
         let element = self
             .client
@@ -119,7 +126,7 @@ impl Crawler {
             .try_fold(std::mem::take(&mut self.state), State::accept_node)
             .await?;
 
-        info!("Crawling complete");
+        // info!("Crawling complete");
         Ok(())
     }
 }

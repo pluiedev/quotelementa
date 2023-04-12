@@ -37,7 +37,7 @@ pub struct BarChart<'a, I, S> {
 }
 
 #[allow(dead_code)]
-impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> BarChart<'a, I, S> {
+impl<'a, S: AsRef<str> + 'a, I: IntoIterator<Item = &'a (S, u64)>> BarChart<'a, I, S> {
     pub fn new(data: I) -> Self {
         Self {
             block: None,
@@ -104,7 +104,7 @@ impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> BarChart<'a, I, S> {
     }
 }
 
-impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> Widget for BarChart<'a, I, S> {
+impl<'a, S: AsRef<str> + 'a, I: IntoIterator<Item = &'a (S, u64)>> Widget for BarChart<'a, I, S> {
     #[allow(clippy::cast_possible_truncation)]
     fn render(mut self, area: Rect, buf: &mut Buffer) {
         buf.set_style(area, self.style);
@@ -122,7 +122,11 @@ impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> Widget for BarChart<'a
             return;
         }
 
-        let mut data: Vec<_> = self.data.into_iter().collect();
+        let mut data: Vec<_> = self
+            .data
+            .into_iter()
+            .map(|(label, value)| (label, *value))
+            .collect();
 
         let max = match self.max {
             Some(max) => max,
@@ -135,12 +139,9 @@ impl<'a, S: AsRef<str>, I: IntoIterator<Item = (S, u64)>> Widget for BarChart<'a
         );
 
         data.truncate(max_index);
-        for (_, v) in &mut data {
-            *v = *v * u64::from(chart_area.height - 1) * 8 / max.max(1);
-        }
 
         for (i, (_, value)) in data.iter_mut().enumerate() {
-            let mut value = *value;
+            let mut value = *value * u64::from(chart_area.height - 1) * 8 / max.max(1);
 
             for j in (0..chart_area.height - 1).rev() {
                 let symbol = match value {

@@ -1,6 +1,6 @@
 mod bar_chart;
 
-use std::{io::Stdout, time::Duration};
+use std::{io::Stdout, time::Duration, vec};
 
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
@@ -10,15 +10,16 @@ use eyre::Result;
 use futures_util::StreamExt;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout},
     style::{Color, Style},
-    widgets::{Block, Borders},
+    text::{Span, Spans},
+    widgets::{Block, Borders, Paragraph},
     Frame, Terminal,
 };
 use tokio::sync::{oneshot, watch};
 use tui_logger::TuiLoggerWidget;
 
-use crate::state::Output;
+use crate::{state::Output, util::Tag};
 
 use self::bar_chart::BarChart;
 
@@ -26,7 +27,7 @@ type Backend = CrosstermBackend<Stdout>;
 
 pub struct Tui {
     terminal: Terminal<Backend>,
-    output: Output,
+    app: App,
 }
 impl Tui {
     pub fn new(output: Output) -> Result<Self> {
@@ -38,7 +39,12 @@ impl Tui {
         };
         let terminal = Terminal::new(backend)?;
 
-        Ok(Self { terminal, output })
+        let app = App {
+            freq: vec![],
+            output,
+        };
+
+        Ok(Self { terminal, app })
     }
     pub fn end(mut self) -> Result<()> {
         terminal::disable_raw_mode()?;
@@ -53,19 +59,20 @@ impl Tui {
         mut close_rx: oneshot::Receiver<()>,
     ) -> Result<()> {
         let mut events = EventStream::new();
-        let mut ui_update_ticker = tokio::time::interval(Duration::from_millis(200));
+        let mut ui_update_ticker = tokio::time::interval(Duration::from_millis(100));
 
         loop {
             tokio::select! {
                 _ = &mut close_rx => break,
                 Some(event) = events.next() => match event? {
                     Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers: KeyModifiers::CONTROL, .. }) => {
-                        shutdown_tx.send(()).expect("Subscribers have somehow all stopped");
+                        shutdown_tx.send(()).unwrap();
                     }
                     _ => {}
                 },
                 _ = ui_update_ticker.tick() => {
-                    let ui = self.ui();
+                    self.app.update().await;
+                    let ui = self.app.ui();
                     self.terminal.draw(ui)?;
                 }
             }
@@ -73,29 +80,58 @@ impl Tui {
 
         self.end()
     }
+}
 
-    fn ui(&mut self) -> impl FnOnce(&mut Frame<'_, Backend>) {
-        // this is SUCH a bad API...
-        let mut freq: Vec<_> = self
-            .output
-            .freq
-            .iter()
-            .map(|v| (v.key().clone(), *v.value() as u64))
-            .collect();
-        freq.sort_by(|a, b| b.1.cmp(&a.1));
+struct App {
+    freq: Vec<(String, u64)>,
+    output: Output,
+}
+impl App {
+    async fn update(&mut self) {
+        if self.output.freq.is_dirty() {
+            // kinda jank but... oh well
+            let freq = self.output.freq.get().await;
+            self.freq = freq
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    if let Some(tag) = Tag::from_repr(i) {
+                        Some((tag.to_string(), *v as u64))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            self.freq.sort_by(|(_, v1), (_, v2)| v2.cmp(&v1));
+        }
+    }
 
+    fn ui(&mut self) -> impl FnOnce(&mut Frame<'_, Backend>) + '_ {
         |f| {
             let layout = Layout::default()
                 .margin(1)
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
                 .split(f.size());
+            let bottom = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+                .split(layout[1]);
 
-            let chart = BarChart::new(freq)
+            let chart = BarChart::new(&self.freq)
                 .block(Block::default().title("Histogram").borders(Borders::ALL))
                 .bar_width(10)
                 .bar_gap(1);
             f.render_widget(chart, layout[0]);
+
+            let info = Paragraph::new(vec![
+                Spans::from(Span::from("4444")),
+                Spans::from(Span::from("4445")),
+                Spans::from(Span::from("4446")),
+            ])
+            .block(Block::default().borders(Borders::ALL))
+            .alignment(Alignment::Center);
+            f.render_widget(info, bottom[0]);
 
             let widget = TuiLoggerWidget::default()
                 .block(Block::default().title("Log").borders(Borders::ALL))
@@ -107,8 +143,7 @@ impl Tui {
                 .style_error(Style::default().fg(Color::Red))
                 .style_trace(Style::default().fg(Color::Magenta))
                 .style_debug(Style::default().fg(Color::Blue));
-
-            f.render_widget(widget, layout[1]);
+            f.render_widget(widget, bottom[1]);
         }
     }
 }

@@ -11,23 +11,24 @@ pub mod assigner;
 pub mod crawler;
 pub mod state;
 pub mod tui;
+mod util;
 
 use argh::FromArgs;
 use deadqueue::limited::Queue;
 use eyre::Result;
+use futures_util::TryFutureExt;
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 use tui_logger::TuiTracingSubscriberLayer;
+use url::Url;
 
 use std::{path::PathBuf, sync::Arc};
 use tokio::{
     sync::{oneshot, watch},
     task::JoinSet,
 };
-use tracing::{info, warn};
+use tracing::{info, warn, error};
 
-use crate::{assigner::Assigner, crawler::Crawler, state::Output, tui::Tui};
-
-type ShutdownRx = watch::Receiver<()>;
+use crate::{assigner::Assigner, crawler::Crawler, state::Output, tui::Tui, util::ShutdownRx};
 
 /// Crawls the interwebs and analyzes the utilization of elemental constituents
 #[derive(FromArgs)]
@@ -55,7 +56,7 @@ struct Opts {
 }
 
 type Workers = JoinSet<Result<()>>;
-type JobQueue = Arc<Queue<String>>;
+type JobQueue = Arc<Queue<Url>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -84,7 +85,11 @@ async fn main() -> Result<()> {
     let assigner = Assigner::new(&opts.sites, job_queue.clone()).await?;
     tokio::spawn(assigner.run(shutdown_rx));
 
-    while workers.join_next().await.is_some() {}
+    while let Some(res) = workers.join_next().await {
+        if let Err(e) = res? {
+            error!(?e, "Encountered error while crawling")
+        }
+    }
 
     info!("Everything done! Exiting...");
     close_tx.send(()).unwrap();
@@ -103,23 +108,22 @@ fn spawn_workers(opts: &Opts, rx: &ShutdownRx, output: &Output) -> (Workers, Job
         caps.insert("goog:chromeOptions".to_owned(), args);
     }
 
-    let job_queue = Arc::new(Queue::<String>::new(10));
+    let job_queue = Arc::new(Queue::new(10));
     let mut workers = JoinSet::new();
 
     for port in 0..opts.workers {
-        let driver = opts.driver.clone();
-        let port = opts.base_port + port;
-        let output = output.clone();
-        let job_queue = Arc::clone(&job_queue);
-        let caps = caps.clone();
         let rx = rx.clone();
 
-        workers.spawn(async move {
-            let crawler = Crawler::new(&driver, port, output, job_queue, caps)
-                .await
-                .unwrap();
-            crawler.run(rx).await
-        });
+        workers.spawn(
+            Crawler::new(
+                opts.driver.clone(),
+                opts.base_port + port,
+                output.clone(),
+                job_queue.clone(),
+                caps.clone(),
+            )
+            .and_then(|c| c.run(rx)),
+        );
     }
 
     (workers, job_queue)

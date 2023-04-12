@@ -5,6 +5,7 @@ use tokio::{
     fs::File,
     io::{AsyncBufReadExt, BufReader, Lines},
 };
+use url::Url;
 
 use crate::{JobQueue, ShutdownRx};
 
@@ -29,7 +30,7 @@ impl Assigner {
                     let Some(mut site) = site? else { break; };
 
                     site.insert_str(0, "https://");
-                    self.queue.push(site).await;
+                    self.queue.push(Url::parse(&site)?).await;
                 }
             }
         }
