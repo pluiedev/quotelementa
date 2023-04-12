@@ -1,23 +1,24 @@
 use std::{
     path::Path,
     process::{Command, Stdio},
-    sync::Arc,
 };
 
-use deadqueue::limited::Queue;
 use eyre::{Context, Result};
 use fantoccini::{wd::Capabilities, Client, ClientBuilder, Locator};
 use futures_util::{StreamExt, TryStreamExt};
 use tracing::*;
 
-use crate::{state::{State, Output}, ShutdownRx};
+use crate::{
+    state::{Output, State},
+    JobQueue, ShutdownRx,
+};
 
 pub struct Crawler {
     port: u16,
     client: Client,
     pub state: State,
 
-    queue: Arc<Queue<String>>,
+    job_queue: JobQueue,
 }
 impl Crawler {
     #[tracing::instrument(skip_all, fields(port = port))]
@@ -25,7 +26,7 @@ impl Crawler {
         driver: &Path,
         port: u16,
         output: Output,
-        queue: Arc<Queue<String>>,
+        job_queue: JobQueue,
         capabilities: Capabilities,
     ) -> Result<Self> {
         info!("Initializing crawler instance");
@@ -58,7 +59,7 @@ impl Crawler {
             port,
             client,
             state,
-            queue,
+            job_queue,
         })
     }
 
@@ -83,10 +84,10 @@ impl Crawler {
 
     #[tracing::instrument(skip(self))]
     async fn crawl_loop(&mut self) -> Result<()> {
-        while self.queue.available() > 0 {
+        while self.job_queue.available() > 0 {
             info!(?self.port, "Crawler waiting for work");
 
-            let site = self.queue.pop().await;
+            let site = self.job_queue.pop().await;
             self.crawl(site).await?;
         }
 

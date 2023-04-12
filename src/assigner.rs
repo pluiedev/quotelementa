@@ -1,20 +1,19 @@
-use std::{path::Path, sync::Arc};
+use std::{path::Path};
 
-use deadqueue::limited::Queue;
 use eyre::Result;
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, BufReader, Lines},
 };
 
-use crate::ShutdownRx;
+use crate::{ShutdownRx, JobQueue};
 
 pub struct Assigner {
     source: Lines<BufReader<File>>,
-    queue: Arc<Queue<String>>,
+    queue: JobQueue,
 }
 impl Assigner {
-    pub async fn new(source: &Path, queue: Arc<Queue<String>>) -> Result<Self> {
+    pub async fn new(source: &Path, queue: JobQueue) -> Result<Self> {
         let source = BufReader::new(File::open(source).await?).lines();
 
         Ok(Self { source, queue })
