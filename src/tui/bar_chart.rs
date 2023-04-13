@@ -1,5 +1,6 @@
 use std::{cmp::min, marker::PhantomData};
 
+use number_prefix::NumberPrefix;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -140,11 +141,11 @@ impl<'a, S: AsRef<str> + 'a, I: IntoIterator<Item = &'a (S, u64)>> Widget for Ba
 
         data.truncate(max_index);
 
-        for (i, (_, value)) in data.iter_mut().enumerate() {
-            let mut value = *value * u64::from(chart_area.height - 1) * 8 / max.max(1);
+        for (i, (label, value)) in data.iter_mut().enumerate() {
+            let mut cnt = *value * u64::from(chart_area.height - 1) * 8 / max.max(1);
 
             for j in (0..chart_area.height - 1).rev() {
-                let symbol = match value {
+                let symbol = match cnt {
                     0 => self.bar_set.empty,
                     1 => self.bar_set.one_eighth,
                     2 => self.bar_set.one_quarter,
@@ -165,17 +166,19 @@ impl<'a, S: AsRef<str> + 'a, I: IntoIterator<Item = &'a (S, u64)>> Widget for Ba
                     .set_style(self.bar_style);
                 }
 
-                if value > 8 {
-                    value -= 8;
+                if cnt > 8 {
+                    cnt -= 8;
                 } else {
-                    value = 0;
+                    cnt = 0;
                 }
             }
-        }
 
-        for (i, (label, value)) in data.iter().enumerate() {
             let label = label.as_ref();
-            let value_label = format!("{value}");
+
+            let value_label = match NumberPrefix::decimal(*value as f64) {
+                NumberPrefix::Standalone(n) => format!("{n}"),
+                NumberPrefix::Prefixed(prefix, n) => format!("{n:.1}{prefix}"),
+            };
             let width = value_label.width() as u16;
             if width < self.bar_width {
                 buf.set_string(

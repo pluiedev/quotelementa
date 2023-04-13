@@ -1,6 +1,6 @@
 mod bar_chart;
 
-use std::{collections::HashMap, io::Stdout, time::Duration, vec};
+use std::{collections::BTreeMap, io::Stdout, time::Duration, vec};
 
 use crossterm::{
     event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers},
@@ -10,13 +10,14 @@ use eyre::Result;
 use futures_util::StreamExt;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Span, Spans},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
 use tokio::sync::{mpsc, oneshot, watch};
+use tracing::info;
 
 use crate::{
     crawler::{CrawlerReport, CrawlerState},
@@ -57,8 +58,19 @@ impl Tui {
 
         loop {
             tokio::select! {
-                _ = &mut close_rx => break,
-                Some(event) = events.next() => self.app.on_event(event?)?,
+                _ = &mut close_rx, if self.app.state != AppState::Done => match self.app.state {
+                    AppState::Running => {
+                        self.app.state = AppState::Done;
+                    }
+                    AppState::ShuttingDown => {
+                        // we're already shutting down anyway
+                        break;
+                    }
+                    _ => unreachable!(),
+                },
+                Some(event) = events.next() => if self.app.on_event(event?)? {
+                    break;
+                },
                 _ = ui_update_ticker.tick() => {
                     self.app.update().await;
                     let ui = self.app.ui();
@@ -74,14 +86,22 @@ impl Tui {
 const SPINNER_STATES: [&str; 8] = ["⣼", "⣹", "⢻", "⠿", "⡟", "⣏", "⣧", "⣶"];
 type SpinnerState = u8;
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum AppState {
+    #[default]
+    Running,
+    ShuttingDown,
+    Done,
+}
+
 pub struct App {
     freq: Vec<(String, u64)>,
     output: Output,
 
-    is_shutting_down: bool,
+    state: AppState,
     shutdown_tx: watch::Sender<()>,
 
-    crawlers: HashMap<Port, (SpinnerState, CrawlerState)>,
+    crawlers: BTreeMap<Port, (SpinnerState, CrawlerState)>,
     report_rx: mpsc::Receiver<CrawlerReport>,
 }
 impl App {
@@ -93,26 +113,36 @@ impl App {
         Self {
             freq: vec![],
             output,
-            is_shutting_down: false,
+            state: AppState::default(),
             shutdown_tx,
-            crawlers: HashMap::new(),
+            crawlers: BTreeMap::new(),
             report_rx,
         }
     }
 
-    fn on_event(&mut self, event: Event) -> Result<()> {
+    fn on_event(&mut self, event: Event) -> Result<bool> {
         match event {
-            Event::Key(KeyEvent {
-                code: KeyCode::Char('c'),
-                modifiers: KeyModifiers::CONTROL,
-                ..
-            }) => {
-                self.is_shutting_down = true;
-                self.shutdown_tx.send(()).unwrap();
-            }
+            Event::Key(key) => match key {
+                KeyEvent {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                    ..
+                } => {
+                    info!("Received Ctrl-C event - issuing shut down");
+                    self.state = AppState::ShuttingDown;
+                    self.shutdown_tx.send(()).unwrap();
+                }
+                KeyEvent {
+                    code: KeyCode::Enter,
+                    ..
+                } if self.state == AppState::Done => {
+                    return Ok(true);
+                }
+                _ => {}
+            },
             _ => {}
         }
-        Ok(())
+        Ok(false)
     }
 
     async fn update(&mut self) {
@@ -122,15 +152,9 @@ impl App {
             self.freq = freq
                 .iter()
                 .enumerate()
-                .filter_map(|(i, v)| {
-                    if let Some(tag) = Tag::from_repr(i) {
-                        Some((tag.to_string(), *v as u64))
-                    } else {
-                        None
-                    }
-                })
+                .filter_map(|(i, v)| Tag::from_repr(i).map(|tag| (tag.to_string(), *v)))
                 .collect();
-            self.freq.sort_by(|(_, v1), (_, v2)| v2.cmp(&v1));
+            self.freq.sort_by(|(_, v1), (_, v2)| v2.cmp(v1));
         }
         while let Ok(report) = self.report_rx.try_recv() {
             self.crawlers.insert(report.port, (0, report.state));
@@ -138,7 +162,7 @@ impl App {
     }
 
     fn ui(&mut self) -> impl FnOnce(&mut Frame<'_, Backend>) + '_ {
-        let crawlers: Vec<_> = self
+        let status: Vec<_> = self
             .crawlers
             .iter_mut()
             .map(|(k, (spinner, v))| {
@@ -167,34 +191,50 @@ impl App {
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Max(40), Constraint::Percentage(70)])
                 .split(f.size());
+            let left = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(70), Constraint::Min(5)])
+                .split(layout[0]);
 
-            let info = Paragraph::new(crawlers)
-                .block(Block::default().title("Status").borders(Borders::ALL));
-            f.render_widget(info, layout[0]);
+            let status = Paragraph::new(status)
+                .block(Block::default().title("[ Status ]").borders(Borders::ALL));
+            f.render_widget(status, left[0]);
 
             let chart = BarChart::new(&self.freq)
-                .block(Block::default().title("Histogram").borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .title("[ Histogram ]")
+                        .borders(Borders::ALL),
+                )
                 .bar_width(10)
                 .bar_gap(1);
             f.render_widget(chart, layout[1]);
 
-            if self.is_shutting_down {
-                let status = Paragraph::new(vec![
-                    Spans::from(" Press CTRL+C again to force quit.                           "),
-                    Spans::from(" (You might have to terminate leftover WebDriver processes!) ")
+            let status_split = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(40),
+                    Constraint::Min(3),
+                    Constraint::Percentage(40),
                 ])
-                    .block(Block::default().borders(Borders::ALL))
-                    .style(Style::default().fg(Color::Red).bg(Color::Gray));
-                f.render_widget(
-                    status,
-                    Rect {
-                        x: 0,
-                        y: f.size().bottom() - 4,
-                        width: 63,
-                        height: 4,
-                    },
-                );
-            }
+                .split(left[1]);
+
+            let status = match self.state {
+                AppState::Running => Paragraph::new(vec![Spans::from(" quotelementa v0.1.0 ")]),
+                AppState::ShuttingDown => Paragraph::new(vec![
+                    Spans::from(" Press CTRL+C again to force quit. "),
+                    Spans::from(" (You might have to terminate leftover WebDriver processes!) "),
+                ]),
+                AppState::Done => Paragraph::new(vec![
+                    Spans::from(" Everything done! "),
+                    Spans::from(" Press <ENTER> to exit "),
+                ]),
+            };
+            let status = status
+                .wrap(Wrap { trim: false })
+                .alignment(ratatui::layout::Alignment::Center);
+            f.render_widget(Block::default().borders(Borders::ALL), left[1]);
+            f.render_widget(status, status_split[1]);
         }
     }
 }
@@ -205,7 +245,7 @@ impl CrawlerState {
             Self::Initializing => Color::Yellow,
             Self::InProgress(_) => Color::LightGreen,
             Self::Idle => Color::White,
-            Self::RanOutOfTasks => Color::DarkGray,
+            Self::Done => Color::DarkGray,
             Self::ShuttingDown => Color::LightRed,
         }
     }

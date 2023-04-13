@@ -27,7 +27,7 @@ pub enum CrawlerState {
     Initializing,
     InProgress(String),
     Idle,
-    RanOutOfTasks,
+    Done,
     ShuttingDown,
 }
 impl Display for CrawlerState {
@@ -36,7 +36,7 @@ impl Display for CrawlerState {
             Self::Initializing => write!(f, "Initializing..."),
             Self::InProgress(url) => write!(f, "{url}"),
             Self::Idle => write!(f, "Idle"),
-            Self::RanOutOfTasks => write!(f, "Ran out of tasks"),
+            Self::Done => write!(f, "Done"),
             Self::ShuttingDown => write!(f, "Shutting down..."),
         }
     }
@@ -102,23 +102,12 @@ impl Crawler {
         })
     }
 
-    async fn report(&self, kind: CrawlerState) {
-        self.report_tx
-            .send(CrawlerReport {
-                port: self.port,
-                state: kind,
-            })
-            .await
-            .expect("Expected UI to be still alive")
-    }
-
     #[tracing::instrument(skip_all, fields(port = self.port))]
     pub async fn run(mut self, mut shutdown_rx: ShutdownRx) -> Result<()> {
         loop {
             tokio::select! {
                 _ = shutdown_rx.changed() => {
                     info!("Shutdown received - exiting");
-                    self.report(CrawlerState::ShuttingDown).await;
                     break;
                 }
                 res = self.crawl_loop() => match res {
@@ -128,12 +117,26 @@ impl Crawler {
             }
         }
 
+        self.report_tx
+            .send(CrawlerReport {
+                port: self.port,
+                state: CrawlerState::ShuttingDown,
+            })
+            .await?;
+
         tokio::select! {
             _ = shutdown_rx.changed() => {
                 info!("Forcibly shutting down!");
             }
             res = self.client.close() => res?,
         }
+
+        self.report_tx
+            .send(CrawlerReport {
+                port: self.port,
+                state: CrawlerState::Done,
+            })
+            .await?;
 
         Ok(())
     }
@@ -142,24 +145,34 @@ impl Crawler {
     async fn crawl_loop(&mut self) -> Result<()> {
         while self.job_queue.available() > 0 {
             info!(?self.port, "Waiting for work");
-            self.report(CrawlerState::Idle).await;
+
+            self.report_tx
+                .send(CrawlerReport {
+                    port: self.port,
+                    state: CrawlerState::Idle,
+                })
+                .await?;
 
             let site = self.job_queue.pop().await;
             self.crawl(site).await?;
         }
 
-        info!("No work remains! Exiting");
-        self.report(CrawlerState::RanOutOfTasks).await;
+        info!("No work remains - I'm done!");
         Ok(())
     }
 
     #[tracing::instrument(skip_all, fields(url = url.as_str()))]
     async fn crawl(&mut self, url: Url) -> Result<()> {
         info!(?url, ?self.port, "Start crawling");
-        self.report(CrawlerState::InProgress(
-            url.as_str().trim_start_matches("https://").to_owned(),
-        ))
-        .await;
+
+        self.report_tx
+            .send(CrawlerReport {
+                port: self.port,
+                state: CrawlerState::InProgress(
+                    url.as_str().trim_start_matches("https://").to_owned(),
+                ),
+            })
+            .await?;
 
         self.client
             .goto(url.as_str())

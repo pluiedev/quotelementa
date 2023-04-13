@@ -18,8 +18,7 @@ use crawler::CrawlerReport;
 use deadqueue::limited::Queue;
 use eyre::Result;
 use futures_util::TryFutureExt;
-use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
-use tui_logger::TuiTracingSubscriberLayer;
+use tracing_subscriber::util::SubscriberInitExt;
 use url::Url;
 use util::Port;
 
@@ -75,7 +74,6 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .with_writer(non_blocking)
         .finish()
-        .with(TuiTracingSubscriberLayer)
         .init();
 
     let opts: Opts = argh::from_env();
@@ -86,7 +84,7 @@ async fn main() -> Result<()> {
     let (mut crawlers, job_queue, output, report_rx) = spawn_crawlers(&opts, &shutdown_rx);
 
     let tui = Tui::new(App::new(output.clone(), report_rx, shutdown_tx))?;
-    tokio::spawn(tui.run(close_rx));
+    let tui = tokio::spawn(tui.run(close_rx));
 
     let assigner = Assigner::new(&opts.sites, job_queue.clone()).await?;
     tokio::spawn(assigner.run(shutdown_rx));
@@ -97,9 +95,11 @@ async fn main() -> Result<()> {
         }
     }
 
-    info!("Everything done! Exiting...");
-    close_tx.send(()).unwrap();
+    info!("Everything done! Waiting for UI to stop...");
     info!(?output);
+
+    close_tx.send(()).unwrap();
+    tui.await??;
 
     Ok(())
 }
