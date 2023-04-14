@@ -223,12 +223,11 @@ impl App {
                 AppState::Running => Paragraph::new(vec![Spans::from(" quotelementa v0.1.0 ")]),
                 AppState::ShuttingDown => Paragraph::new(vec![
                     Spans::from(" Press CTRL+C again to force quit. "),
-                    Spans::from(" (You might have to terminate leftover WebDriver processes!) "),
                 ]),
                 AppState::Done => Paragraph::new(vec![
                     Spans::from(" Everything done! "),
                     Spans::from(" Press <ENTER> to exit "),
-                ]),
+                ]).style(Style::default().fg(Color::LightYellow)),
             };
             let status = status
                 .wrap(Wrap { trim: false })

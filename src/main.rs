@@ -110,11 +110,12 @@ fn spawn_crawlers(
 ) -> (Workers, JobQueue, Output, mpsc::Receiver<CrawlerReport>) {
     let mut caps = serde_json::map::Map::new();
     if !opts.no_headless {
-        let args = serde_json::json!({
-            "args": ["--headless", "--disable-gpu"]
-        });
-        caps.insert("moz:firefoxOptions".to_owned(), args.clone());
-        caps.insert("goog:chromeOptions".to_owned(), args);
+        caps.insert("moz:firefoxOptions".to_owned(), serde_json::json!({
+            "args": ["--headless"]
+        }));
+        caps.insert("goog:chromeOptions".to_owned(), serde_json::json!({
+            "args": ["--headless=new", "--disable-gpu"]
+        }));
     }
 
     let double_workers = usize::from(opts.workers * 2);

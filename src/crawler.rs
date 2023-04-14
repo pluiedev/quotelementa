@@ -1,13 +1,9 @@
-use std::{
-    fmt::Display,
-    path::PathBuf,
-    process::{Command, Stdio},
-};
+use std::{fmt::Display, path::PathBuf, process::Stdio};
 
 use eyre::{Context, Result};
 use fantoccini::{wd::Capabilities, Client, ClientBuilder, Locator};
 use futures_util::{StreamExt, TryStreamExt};
-use tokio::sync::mpsc;
+use tokio::{process::{Command, Child}, sync::mpsc};
 use tracing::*;
 use url::Url;
 
@@ -44,6 +40,7 @@ impl Display for CrawlerState {
 
 pub struct Crawler {
     port: Port,
+    _driver: Child,
     client: Client,
     pub state: State,
 
@@ -77,6 +74,7 @@ impl Crawler {
             .arg(format!("--port={port}"))
             .stdout(Stdio::from(log_file.try_clone()?))
             .stderr(Stdio::from(log_file))
+            .kill_on_drop(true)
             .spawn()?;
         debug!(id = driver.id(), "WebDriver spawned");
 
@@ -95,6 +93,7 @@ impl Crawler {
 
         Ok(Self {
             port,
+            _driver: driver,
             client,
             state,
             job_queue,
