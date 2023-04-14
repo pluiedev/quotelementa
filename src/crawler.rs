@@ -3,7 +3,10 @@ use std::{fmt::Display, path::PathBuf, process::Stdio};
 use eyre::{Context, Result};
 use fantoccini::{wd::Capabilities, Client, ClientBuilder, Locator};
 use futures_util::{StreamExt, TryStreamExt};
-use tokio::{process::{Command, Child}, sync::mpsc};
+use tokio::{
+    process::{Child, Command},
+    sync::mpsc,
+};
 use tracing::*;
 use url::Url;
 
@@ -18,29 +21,29 @@ pub struct CrawlerReport {
     pub port: Port,
     pub state: CrawlerState,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CrawlerState {
     Initializing,
     InProgress(String),
-    Idle,
-    Done,
+    Complete,
     ShuttingDown,
+    Terminated,
 }
 impl Display for CrawlerState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Initializing => write!(f, "Initializing..."),
             Self::InProgress(url) => write!(f, "{url}"),
-            Self::Idle => write!(f, "Idle"),
-            Self::Done => write!(f, "Done"),
+            Self::Complete => write!(f, "Complete!"),
             Self::ShuttingDown => write!(f, "Shutting down..."),
+            Self::Terminated => write!(f, "Terminated"),
         }
     }
 }
 
 pub struct Crawler {
     port: Port,
-    _driver: Child,
+    driver: Child,
     client: Client,
     pub state: State,
 
@@ -66,6 +69,33 @@ impl Crawler {
             .await
             .expect("UI should still be alive");
 
+        match Self::init_session(port, driver, capabilities, output).await {
+            Ok((driver, client, state)) => Ok(Self {
+                port,
+                driver,
+                client,
+                state,
+                job_queue,
+                report_tx,
+            }),
+            Err(e) => {
+                report_tx
+                    .send(CrawlerReport {
+                        port,
+                        state: CrawlerState::Terminated,
+                    })
+                    .await
+                    .expect("UI should still be alive");
+                Err(e)
+            }
+        }
+    }
+    async fn init_session(
+        port: Port,
+        driver: PathBuf,
+        capabilities: Capabilities,
+        output: Output,
+    ) -> Result<(Child, Client, State)> {
         let log_path = format!("webdriver-{port}.log");
         let log_file = std::fs::File::create(&log_path)?;
         debug!(?log_path, "WebDriver log file created");
@@ -91,14 +121,7 @@ impl Crawler {
 
         let state = State::new(output, &client).await?;
 
-        Ok(Self {
-            port,
-            _driver: driver,
-            client,
-            state,
-            job_queue,
-            report_tx,
-        })
+        Ok((driver, client, state))
     }
 
     #[tracing::instrument(skip_all, fields(port = self.port))]
@@ -130,10 +153,11 @@ impl Crawler {
             res = self.client.close() => res?,
         }
 
+        self.driver.start_kill()?;
         self.report_tx
             .send(CrawlerReport {
                 port: self.port,
-                state: CrawlerState::Done,
+                state: CrawlerState::Terminated,
             })
             .await?;
 
@@ -142,18 +166,17 @@ impl Crawler {
 
     #[tracing::instrument(skip(self))]
     async fn crawl_loop(&mut self) -> Result<()> {
-        while self.job_queue.available() > 0 {
-            info!(?self.port, "Waiting for work");
+        while let Some(site) = self.job_queue.try_pop() {
+            if let Err(e) = self.crawl(site).await {
+                error!(%e, "Error while crawling");
+            }
 
             self.report_tx
                 .send(CrawlerReport {
                     port: self.port,
-                    state: CrawlerState::Idle,
+                    state: CrawlerState::Complete,
                 })
                 .await?;
-
-            let site = self.job_queue.pop().await;
-            self.crawl(site).await?;
         }
 
         info!("No work remains - I'm done!");

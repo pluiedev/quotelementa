@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Span, Spans},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Gauge, Paragraph, Wrap},
     Frame, Terminal,
 };
 use tokio::sync::{mpsc, oneshot, watch};
@@ -101,6 +101,9 @@ pub struct App {
     state: AppState,
     shutdown_tx: watch::Sender<()>,
 
+    crawled_sites: usize,
+    total_sites: usize,
+
     crawlers: BTreeMap<Port, (SpinnerState, CrawlerState)>,
     report_rx: mpsc::Receiver<CrawlerReport>,
 }
@@ -108,6 +111,7 @@ impl App {
     pub fn new(
         output: Output,
         report_rx: mpsc::Receiver<CrawlerReport>,
+        total_sites: usize,
         shutdown_tx: watch::Sender<()>,
     ) -> Self {
         Self {
@@ -115,6 +119,8 @@ impl App {
             output,
             state: AppState::default(),
             shutdown_tx,
+            crawled_sites: 0,
+            total_sites,
             crawlers: BTreeMap::new(),
             report_rx,
         }
@@ -157,7 +163,17 @@ impl App {
             self.freq.sort_by(|(_, v1), (_, v2)| v2.cmp(v1));
         }
         while let Ok(report) = self.report_rx.try_recv() {
-            self.crawlers.insert(report.port, (0, report.state));
+            match report.state {
+                CrawlerState::Complete => {
+                    self.crawled_sites += 1;
+                }
+                CrawlerState::Terminated => {
+                    self.crawlers.remove(&report.port);
+                }
+                _ => {
+                    self.crawlers.insert(report.port, (0, report.state));
+                }
+            }
         }
     }
 
@@ -196,44 +212,72 @@ impl App {
                 .constraints([Constraint::Percentage(70), Constraint::Min(5)])
                 .split(layout[0]);
 
-            let status = Paragraph::new(status)
-                .block(Block::default().title("[ Status ]").borders(Borders::ALL));
-            f.render_widget(status, left[0]);
-
             let chart = BarChart::new(&self.freq)
-                .block(
-                    Block::default()
-                        .title("[ Histogram ]")
-                        .borders(Borders::ALL),
-                )
+                .block(Block::default().title(" Histogram ").borders(Borders::ALL))
                 .bar_width(10)
                 .bar_gap(1);
             f.render_widget(chart, layout[1]);
 
-            let status_split = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(40),
-                    Constraint::Min(3),
-                    Constraint::Percentage(40),
-                ])
-                .split(left[1]);
+            {
+                let block = Block::default()
+                    .title(" Active Crawlers ")
+                    .borders(Borders::ALL);
+                let split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(70), Constraint::Max(1)])
+                    .split(block.inner(left[0]));
+                let status = Paragraph::new(status);
+                f.render_widget(block, left[0]);
+                f.render_widget(status, split[0]);
 
-            let status = match self.state {
-                AppState::Running => Paragraph::new(vec![Spans::from(" quotelementa v0.1.0 ")]),
-                AppState::ShuttingDown => Paragraph::new(vec![
-                    Spans::from(" Press CTRL+C again to force quit. "),
-                ]),
-                AppState::Done => Paragraph::new(vec![
-                    Spans::from(" Everything done! "),
-                    Spans::from(" Press <ENTER> to exit "),
-                ]).style(Style::default().fg(Color::LightYellow)),
-            };
-            let status = status
-                .wrap(Wrap { trim: false })
-                .alignment(ratatui::layout::Alignment::Center);
-            f.render_widget(Block::default().borders(Borders::ALL), left[1]);
-            f.render_widget(status, status_split[1]);
+                let ratio = self.crawled_sites as f64 / self.total_sites as f64;
+                f.render_widget(
+                    Gauge::default()
+                        .gauge_style(Style::default().fg(Color::LightGreen))
+                        .label(format!(
+                            "{:.1}% ({}/{})",
+                            ratio * 100.0,
+                            self.crawled_sites,
+                            self.total_sites
+                        ))
+                        .ratio(ratio),
+                    split[1],
+                );
+            }
+            {
+                let block = Block::default().borders(Borders::ALL);
+                let split = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Percentage(40),
+                        Constraint::Min(3),
+                        Constraint::Percentage(40),
+                    ])
+                    .split(block.inner(left[1]));
+
+                let status = match self.state {
+                    AppState::Running => Paragraph::new(vec![
+                        Spans::from(""),
+                        Spans::from(" quotelementa v0.1.0 "),
+                        Spans::from(""),
+                    ]),
+                    AppState::ShuttingDown => {
+                        Paragraph::new(vec![Spans::from(" Press CTRL+C again to force quit. ")])
+                    }
+                    AppState::Done => Paragraph::new(vec![
+                        Spans::from(" Everything done! "),
+                        Spans::from(""),
+                        Spans::from(" Press <ENTER> to exit "),
+                    ])
+                    .style(Style::default().fg(Color::LightYellow)),
+                };
+                let status = status
+                    .wrap(Wrap { trim: false })
+                    .alignment(ratatui::layout::Alignment::Center);
+
+                f.render_widget(block, left[1]);
+                f.render_widget(status, split[1]);
+            }
         }
     }
 }
@@ -243,9 +287,8 @@ impl CrawlerState {
         match self {
             Self::Initializing => Color::Yellow,
             Self::InProgress(_) => Color::LightGreen,
-            Self::Idle => Color::White,
-            Self::Done => Color::DarkGray,
             Self::ShuttingDown => Color::LightRed,
+            _ => Color::DarkGray,
         }
     }
     pub fn should_spinner_spin(&self) -> bool {

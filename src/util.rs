@@ -1,9 +1,14 @@
-use strum::{Display, EnumString, EnumCount, FromRepr};
+use std::sync::Arc;
+
+use deadqueue::limited::Queue;
+use strum::{Display, EnumCount, EnumString, FromRepr};
 use tokio::sync::watch;
+use url::Url;
 
 pub type Port = u16;
 pub type ShutdownRx = watch::Receiver<()>;
-
+pub type JobQueue = Arc<Queue<Url>>;
+pub type Capabilities = serde_json::Map<String, serde_json::Value>;
 
 #[derive(EnumString, EnumCount, FromRepr, Display, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[strum(serialize_all = "snake_case")]
